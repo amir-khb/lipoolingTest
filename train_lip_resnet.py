@@ -2,15 +2,15 @@ import torch
 from torch.utils.data import DataLoader
 import torch.nn as nn
 import torch.optim as optim
-from models.baseline import BaselineSegmentation
-from utils.data_loading import get_data_loaders
 from tqdm import tqdm
+from models.segmentation import LIPSegmentationModel
+from utils.data_loading import get_data_loaders
 
 
-def train():
+def train_lip_model():
     # Setup
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = BaselineSegmentation().to(device)
+    model = LIPSegmentationModel(num_classes=1).to(device)
     criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
 
@@ -21,23 +21,21 @@ def train():
     num_epochs = 10
     best_val_iou = 0
 
-    # Main epoch loop with progress bar
-    for epoch in tqdm(range(num_epochs), desc='Epochs'):
+    for epoch in tqdm(range(num_epochs), desc='Epochs',disable=True):
         # Training
         model.train()
         train_loss = 0
 
-        # Progress bar for training batches
         train_pbar = tqdm(data_loaders['source']['train'],
                           desc=f'Training Epoch {epoch + 1}',
-                          leave=False)
+                          leave=True)
 
         for images, masks in train_pbar:
             images = images.to(device)
             masks = masks.to(device)
 
-            # Forward pass
-            outputs = model(images)
+            # Forward pass with is_training=True
+            outputs, _ = model(images, is_training=True)
             loss = criterion(outputs, masks.float())
 
             # Backward pass
@@ -46,25 +44,23 @@ def train():
             optimizer.step()
 
             train_loss += loss.item()
-
-            # Update training progress bar
             train_pbar.set_postfix({'Loss': f'{loss.item():.4f}'})
 
         # Validation
         model.eval()
         val_iou = 0
 
-        # Progress bar for validation batches
         val_pbar = tqdm(data_loaders['source']['val'],
                         desc='Validation',
-                        leave=False)
+                        leave=True)
 
         with torch.no_grad():
             for images, masks in val_pbar:
                 images = images.to(device)
                 masks = masks.to(device)
 
-                outputs = model(images)
+                # Forward pass with is_training=False to enable uncertainty
+                outputs, feature_dict = model(images, is_training=False)
                 predictions = (torch.sigmoid(outputs) > 0.5).float()
 
                 # Calculate IoU
@@ -73,7 +69,6 @@ def train():
                 batch_iou = (intersection / (union + 1e-6)).item()
                 val_iou += batch_iou
 
-                # Update validation progress bar
                 val_pbar.set_postfix({'IoU': f'{batch_iou:.4f}'})
 
         val_iou /= len(data_loaders['source']['val'])
@@ -81,7 +76,13 @@ def train():
         # Save best model
         if val_iou > best_val_iou:
             best_val_iou = val_iou
-            torch.save(model.state_dict(), 'best_model.pth')
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'best_iou': best_val_iou,
+                'feature_dict': feature_dict,  # Save feature dictionary for analysis
+            }, 'best_lip_model.pth')
 
         # Print epoch results
         print(f'\nEpoch [{epoch + 1}/{num_epochs}]')
@@ -92,4 +93,4 @@ def train():
 
 
 if __name__ == '__main__':
-    train()
+    train_lip_model()
